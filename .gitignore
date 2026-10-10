@@ -22,3 +22,8 @@ token.txt
 *token*.txt
 .env
 .env.*
+
+# 实验生成的配对数据集（约 18 MB，一条 `python dataset.py` 即可重建）
+# 结果与图（results.json / results.md / fig*.png）是交付物，照常提交。
+experiments/*/data/
+.tmp_experiments/
