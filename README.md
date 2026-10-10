@@ -173,6 +173,14 @@ If you use this repository in your research:
 
 See the [algorithm guide §9.3 and §11](docs/algorithm-guide.md) for the reference list, including the foundational works and related modern methods.
 
+## A note at the end
+
+The Moon has no air, so a shadow there is not a soft gradient but an edge — the terrain either
+sees the Sun or it does not. This module spends most of its code on where that edge falls.
+
+It is dedicated to *Haruhikage* — for whoever wrote the first few bars
+of that opening, and for everyone who has ever had a spring they cannot go back to.
+
 ## License
 
 [MIT](LICENSE)
