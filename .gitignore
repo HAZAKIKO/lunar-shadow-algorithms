@@ -16,3 +16,9 @@ env/
 # 生成的中间产物（示例图 lunar_shadow_figure.png 是交付物，不忽略）
 *.tmp
 .update-tmp/
+
+# ⚠️ 密钥绝不能进仓库
+token.txt
+*token*.txt
+.env
+.env.*
