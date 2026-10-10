@@ -1,39 +1,46 @@
 # -*- coding: utf-8 -*-
 """
-lunar_shadow.py —— 月面光照/阴影算法的可运行实现
+lunar_shadow.py —— a runnable implementation of lunar-surface illumination/shadow algorithms
 =================================================
 
-对应文档《月面光照与阴影算法指南》的代码部分。包含三类算法：
+The code companion to the document "Lunar Surface Illumination and Shadow Algorithms: A Guide".
+It contains three families of algorithms:
 
-  A. 正演：DEM + 太阳位置 -> 光照/阴影掩膜
-     - compute_illumination()   射线行进（ray-marching），含局部坡面朝向判定
-     - horizon_map()            地平线图，预计算一次即可遍历任意太阳方位
-     - illuminate_from_horizon() 用地平线图查表得到光照掩膜（O(1) 每次）
-     - solar_position_analytic() 月球太阳位置解析近似（教学/仿真用）
-     - dem_to_lonlat()          行列号 <-> 经纬度的简单等距投影（教学用）
-     - subsolar_lonlat_analytic() 亚太阳点经纬度（教学用）
+  A. Forward: DEM + sun position -> illumination/shadow mask
+     - compute_illumination()   ray marching, including the local slope-orientation test
+     - horizon_map()            horizon map; precompute once and sweep any sun azimuth
+     - illuminate_from_horizon() horizon-map lookup for the illumination mask (O(1) per query)
+     - solar_position_analytic() analytic approximation of the lunar solar position (teaching/simulation)
+     - dem_to_lonlat()          simple equidistant row/col <-> lon/lat projection (teaching)
+     - subsolar_lonlat_analytic() sub-solar point lon/lat (teaching)
 
-  B. 反演：图像 -> 阴影掩膜
-     - image_shadow_mask()      亮度 + 饱和度双阈值 + 形态学清理
-     - illumination_invariant() 局部亮度归一化，压制光照变化
+  B. Inverse: image -> shadow mask
+     - image_shadow_mask()      brightness + saturation dual threshold + morphological cleanup
+     - illumination_invariant() local brightness normalisation; suppresses illumination changes
 
-  C. 测量/重建：阴影 -> 几何 / 光照参数
-     - estimate_sun_elevation_from_shadow()  阴影长度比 -> 太阳高度角
-     - recover_sun_geometry()   由阴影掩膜反演 (方位角, 高度角)
-     - shadow_length_to_height() 阴影长度 -> 物体高度
+  C. Measurement/reconstruction: shadow -> geometry / illumination parameters
+     - estimate_sun_elevation_from_shadow()  shadow length ratio -> solar elevation angle
+     - recover_sun_geometry()   invert a shadow mask for (azimuth, elevation)
+     - shadow_length_to_height() shadow length -> object height
 
-  评估：iou / f1_with_tolerance / match_shadow_masks
+  Evaluation: iou / f1_with_tolerance / match_shadow_masks
 
-依赖：numpy（必需）、scipy（可选，仅用于更快的形态学与滤波）
-运行自检：python check_lunar_shadow.py
+Dependencies: numpy (required), scipy (optional, only for faster morphology and filtering)
+Run the self-check: python check_lunar_shadow.py
 
-坐标约定（全文统一，务必记住）
+Coordinate conventions (uniform throughout — memorise these)
 -----------------------------
-  * dem 形状 (H, W) 的 numpy 数组，单位米，dem[row, col]。
-  * 图像坐标系：col 增大 = 向东，row 减小 = 向北。
-  * 方位角 az_deg 使用罗盘方位：0°=正北，90°=正东，180°=正南，270°=正西。
-  * 太阳方位角 = 从该点看太阳的罗盘方位；太阳高度角 el_deg = 0° 在地平线，90° 在天顶。
-  * 方向向量（图像坐标）：dcol = +sin(az)*cos(el)，drow = -cos(az)*cos(el)。
+  * dem is a (H, W) numpy array in metres, dem[row, col].
+  * Image coordinate system: increasing col = east, decreasing row = north.
+  * The azimuth az_deg uses compass bearings: 0°=north, 90°=east, 180°=south, 270°=west.
+  * Solar azimuth = the compass bearing of the Sun as seen from that point; solar elevation el_deg = 0° at the horizon, 90° at the zenith.
+  * Direction vector (image coordinates): dcol = +sin(az)*cos(el), drow = -cos(az)*cos(el).
+
+Easter egg (HARUHIKAGE)
+-----------------------
+  The Moon has no air, so the terminator of a shadow there is not a gradient but an edge.
+  Everything below exists to answer one question: where exactly does that edge fall?
+  Written while listening to the opening of "Haruhikage" (春日影, CRYCHIC) on repeat.
 """
 
 from __future__ import annotations
@@ -68,47 +75,50 @@ EPS = 1e-9
 
 
 # ----------------------------------------------------------------------------
-# 基础工具
+# Basic utilities
 # ----------------------------------------------------------------------------
 def sun_direction(az_deg: float, el_deg: float) -> tuple[float, float, float]:
-    """**指向太阳**的单位方向向量（图像坐标 + 高度）。
+    """Unit direction vector **pointing at the Sun** (image coordinates + height).
 
-    返回 (dcol, drow, dz)，其中 dcol 向东为正、drow 向北为负（因为 row 向下增大）。
+    Returns (dcol, drow, dz), where dcol is positive towards the east and drow is negative
+    towards the north (because row increases downwards).
     """
     az, el = np.deg2rad(az_deg), np.deg2rad(el_deg)
     return (np.sin(az) * np.cos(el), -np.cos(az) * np.cos(el), np.sin(el))
 
 
 def horizontal_direction(az_deg: float) -> tuple[float, float]:
-    """水平面内沿方位角 az 的**单位**方向 (dcol, drow)。
+    """**Unit** direction (dcol, drow) in the horizontal plane along azimuth az.
 
-    单独抽出来是为了防止一个真实踩过的坑：用 sun_direction(az, 90.0) 想取"水平方向"，
-    结果 cos(90°)=0 让向量退化成零向量，整个地平线计算静默失效（全部返回初始值）。
+    This is factored out to guard against a pitfall we really did hit: using
+    sun_direction(az, 90.0) to get a "horizontal direction" makes cos(90°)=0 collapse the
+    vector to zero, so the whole horizon computation fails silently (everything keeps its
+    initial value).
     """
     az = np.deg2rad(az_deg)
     return (float(np.sin(az)), float(-np.cos(az)))
 
 
 def terrain_gradient(dem: np.ndarray, cell: float = 1.0):
-    """返回 (gx, gy, slope_rad)。
-    gx = d z / d 东（米/米），gy = d z / d 北（米/米）。
+    """Returns (gx, gy, slope_rad).
+    gx = d z / d east (m/m), gy = d z / d north (m/m).
     """
-    drow, dcol = np.gradient(dem, cell)   # np.gradient 返回 (axis0, axis1)
-    gx, gy = dcol, -drow                  # row 向南增大 -> 向北取负
+    drow, dcol = np.gradient(dem, cell)   # np.gradient returns (axis0, axis1)
+    gx, gy = dcol, -drow                  # row increases southward -> negate for north
     slope = np.arctan(np.hypot(gx, gy))
     return gx, gy, slope
 
 
 def _shift_zero(a: np.ndarray, drow: int, dcol: int, fill: float) -> np.ndarray:
-    """零填充平移：结果[i, j] = a[i - drow, j - dcol]，越界处填 fill。
+    """Zero-padded shift: out[i, j] = a[i - drow, j - dcol], out-of-bounds filled with fill.
 
-    这是本模块的关键工具：**必须用零填充，不能用 np.roll**。
-    np.roll 是环形回绕，会在图像边缘产生虚假遮挡。
+    This is the key utility of this module: **zero padding is mandatory; np.roll is not allowed**.
+    np.roll is a cyclic wrap-around, which produces phantom occlusion at image borders.
     """
     H, W = a.shape
 
     def _sl(start: int, shift: int, n: int) -> slice:
-        """区间 [start, start+n) 减去 shift 后的切片（用于目标或源）。"""
+        """Slice of the interval [start, start+n) after subtracting shift (for destination or source)."""
         return slice(start - shift, start - shift + n)
 
     rows_dst = slice(max(0, drow), H + min(0, drow))
@@ -122,7 +132,7 @@ def _shift_zero(a: np.ndarray, drow: int, dcol: int, fill: float) -> np.ndarray:
 
 
 # ----------------------------------------------------------------------------
-# A. 正演：DEM -> 光照/阴影
+# A. Forward: DEM -> illumination/shadow
 # ----------------------------------------------------------------------------
 def compute_illumination(
     dem: np.ndarray,
@@ -133,30 +143,34 @@ def compute_illumination(
     use_slope_term: bool = True,
     min_cos_incidence: float = 0.0,
 ) -> np.ndarray:
-    """射线行进法计算光照掩膜。
+    """Compute an illumination mask by ray marching.
 
-    对每个像素沿太阳方向的**反方向**逐步外推，判断地形是否挡住太阳。
-    判定条件（第 k 步）：
-        z(邻域) > z(本点) + k * cell * tan(el)
-    等价于该邻域点的地平高度角 > 太阳高度角。
+    For every pixel, step outward along the direction **opposite** to the Sun and test whether
+    the terrain blocks the Sun. The predicate at step k is:
+        z(neighbour) > z(this point) + k * cell * tan(el)
+    which is equivalent to "the horizon elevation angle of that neighbour exceeds the solar
+    elevation angle".
 
     Parameters
     ----------
-    dem : (H, W) 高程，米
-    az_deg, el_deg : 太阳罗盘方位角 / 高度角（度）
-    cell : 网格边长，米
-    max_steps : 最大外推步数，默认取 2*max(H, W)
-    use_slope_term : 是否加入"局部坡面背向太阳"判定（attached shadow）。
-        月球极区太阳高度角极低，背阳坡面积占比很大，强烈建议开启。
-    min_cos_incidence : 局部入射角余弦阈值，低于此值判为背阳（默认 0，即 >=90° 才判背阳）
+    dem : (H, W) elevation, metres
+    az_deg, el_deg : solar compass azimuth / elevation angle (degrees)
+    cell : grid cell size, metres
+    max_steps : maximum number of outward steps; defaults to 2*max(H, W)
+    use_slope_term : whether to add the "local slope faces away from the Sun" test
+        (attached shadow). Solar elevation in the lunar polar regions is extremely low and
+        the area fraction of slopes facing away from the Sun is large, so turning this on is
+        strongly recommended.
+    min_cos_incidence : cosine threshold for the local incidence angle; below it the surface
+        counts as facing away (default 0, i.e. only >=90° counts as facing away)
 
     Returns
     -------
-    illum : (H, W) uint8，1 = 被太阳照亮，0 = 在阴影中
+    illum : (H, W) uint8, 1 = lit by the Sun, 0 = in shadow
     """
     dem = np.asarray(dem, dtype=np.float64)
     if dem.ndim != 2:
-        raise ValueError("dem 必须是二维数组")
+        raise ValueError("dem must be a 2-D array")
     H, W = dem.shape
     if max_steps is None:
         max_steps = int(2 * max(H, W))
@@ -166,39 +180,44 @@ def compute_illumination(
 
     illum = np.ones((H, W), dtype=bool)
 
-    # 1) 局部坡面朝向（attached shadow）：背阳坡收不到直射光
+    # 1) Local slope orientation (attached shadow): slopes facing away receive no direct sunlight
     if use_slope_term:
         gx, gy, _ = terrain_gradient(dem, cell)
-        # 地表法向 n ∝ (-gx, -gy, 1)；与太阳方向的余弦
+        # surface normal n ∝ (-gx, -gy, 1); cosine with the sun direction
         cos_inc = (-gx * dcol - gy * drow + dz) / np.sqrt(gx ** 2 + gy ** 2 + 1.0)
         illum &= cos_inc > min_cos_incidence
 
-    # 2) 地形投射阴影（cast shadow）
+    # 2) Terrain cast shadow
     #
-    # 判别式（方向务必注意！）：
-    #   "谁挡住太阳" —— 遮挡物在**太阳那一侧**。sun_direction() 返回的是**指向太阳**的
-    #   单位向量，所以沿 -(dcol, drow) 方向外推去采样地形；而阴影本身落在太阳的**反侧**。
+    # The predicate (mind the direction!):
+    #   "who blocks the Sun" — the occluder is on the **Sun's side**. sun_direction() returns
+    #   the unit vector **pointing at the Sun**, so we step outward along -(dcol, drow) to
+    #   sample the terrain; the shadow itself falls on the **opposite side** from the Sun.
     #
-    #   第 k 步（水平距离 d = k*cell）处，太阳光线相对本点的高度为
-    #       ray_h = z(本点) + d * tan(el)
-    #   该处地形挡住太阳，当且仅当地形高于这条光线：
-    #       z(太阳侧邻域) >= ray_h
-    #   等价于"邻域相对本点的地平高度角 >= 太阳高度角"。
-    #   平坦地形时左边为 0 < d*tan(el)，不产生阴影（健全性检查）。
+    #   At step k (horizontal distance d = k*cell), the height of the sun ray relative to this
+    #   point is
+    #       ray_h = z(this point) + d * tan(el)
+    #   The terrain there blocks the Sun if and only if it rises above that ray:
+    #       z(sun-side neighbour) >= ray_h
+    #   which is equivalent to "the horizon elevation angle of that neighbour relative to this
+    #   point >= the solar elevation angle".
+    #   On flat terrain the left-hand side is 0 < d*tan(el), so no shadow is produced
+    #   (a sanity check).
     alive = illum.copy()
     for k in range(1, max_steps + 1):
-        srow = int(round(-k * drow / cell))      # 注意负号：向太阳方向采样
-        scol = int(round(-k * dcol / cell))      # 注意负号：向太阳方向采样
+        srow = int(round(-k * drow / cell))      # note the minus sign: sample towards the Sun
+        scol = int(round(-k * dcol / cell))      # note the minus sign: sample towards the Sun
         if abs(srow) >= H or abs(scol) >= W:
             break
         if srow == 0 and scol == 0:
             continue
         shifted = _shift_zero(dem, srow, scol, fill=-np.inf)
-        # 关键：在第 k 步处，不能只用 k 这一个距离去比，否则当 srow/scol 因取整重复时
-        # （例如 k 从 2 到 40 都映射到同一格），该格会一直用同一个 k 判角度，导致
-        # 系统性漏检阴影。正确做法是把该格覆盖的**整个距离区间**都算进去：
-        # 只要存在 d ∈ [k-0.5, k+0.5] 使地形挡住光线，就判为阴影。取 k-0.5 最保守，
-        # 因为光线最低、最容易被挡。
+        # Key point: at step k we must not test the single distance k, because when srow/scol
+        # repeat due to rounding (e.g. k from 2 to 40 all map to the same cell) that cell keeps
+        # being tested at the same angle, which systematically misses shadows. The correct
+        # approach is to cover the **entire distance interval** that cell spans: if there exists
+        # d ∈ [k-0.5, k+0.5] where the terrain blocks the ray, it counts as shadow. k-0.5 is the
+        # most conservative choice, because that ray is the lowest and easiest to block.
         if k == 1:
             k_lo = 1.0
         else:
@@ -223,28 +242,32 @@ def horizon_map(
     n_az: int = 72,
     max_dist: float | None = None,
 ) -> np.ndarray:
-    """预计算地平线图（horizon map）。
+    """Precompute the horizon map.
 
-    H(i, j, m) = 在像素 (i, j) 沿方位角 m 指向**太阳**的方向上，地形相对该点的
-    **最大仰角**（度）。有了它，"太阳是否被挡住"退化为一次查表：
+    H(i, j, m) = the **maximum elevation angle** (degrees) of the terrain relative to pixel
+    (i, j), along the direction of azimuth m **pointing at the Sun**. With it, "is the Sun
+    blocked?" degenerates into a single lookup:
 
         shaded  <=>  el_sun < H(i, j, az)
 
-    换太阳方位角不需要重算，这是它相对射线行进的最大优势。
+    Changing the sun azimuth requires no recomputation — its biggest advantage over ray
+    marching.
 
-    ⚠️ 方位角约定：这里的 az 是**太阳的罗盘方位角**（与 compute_illumination 一致），
-    因此内部采样方向是 -(sin az, -cos az)（即指向太阳）。早期版本误用了"沿 az 看出去"
-    的方向（差 180°），会让阴影落在太阳同侧——单靠代码审查很难发现，
-    必须用"南北向山脊 + 太阳在正东/正西"这类解析算例把它钉死。
+    ⚠️ Azimuth convention: az here is the **Sun's compass azimuth** (consistent with
+    compute_illumination), so the internal sampling direction is -(sin az, -cos az) (i.e.
+    pointing at the Sun). An early version mistakenly used the "look outward along az"
+    direction (off by 180°), which put shadows on the same side as the Sun — very hard to
+    catch by code review alone; you have to pin it down with an analytic case such as
+    "north–south ridge + sun due east/west".
 
     Parameters
     ----------
-    n_az : 方位角分箱数，360/n_az 为角分辨率。默认 72 -> 5°
-    max_dist : 最大探测距离（米），默认 2*max(H, W)*cell
+    n_az : number of azimuth bins; 360/n_az is the angular resolution. Default 72 -> 5°
+    max_dist : maximum probing distance (metres); defaults to 2*max(H, W)*cell
 
     Returns
     -------
-    Hmap : (n_az, H, W) float32，单位度
+    Hmap : (n_az, H, W) float32, in degrees
     """
     dem = np.asarray(dem, dtype=np.float64)
     H, W = dem.shape
@@ -256,7 +279,7 @@ def horizon_map(
     Hmap = np.zeros((n_az, H, W), dtype=np.float32)
 
     for m, az_deg in enumerate(az_list):
-        # 指向太阳的单位水平方向（不能写成 horizontal_direction(az_deg)，差 180°）
+        # unit horizontal direction pointing at the Sun (must NOT be horizontal_direction(az_deg): off by 180°)
         dcol, drow = horizontal_direction(az_deg + 180.0)
         best = np.full((H, W), -90.0, dtype=np.float64)
         for k in range(1, max_steps + 1):
@@ -282,11 +305,11 @@ def illuminate_from_horizon(
     cell: float = 1.0,
     use_slope_term: bool = True,
 ) -> np.ndarray:
-    """用地平线图 + 线性插值查表得到光照掩膜（不重新射线行进）。"""
+    """Get an illumination mask by horizon-map lookup with linear interpolation (no re-marching)."""
     dem = np.asarray(dem, dtype=np.float64)
     n_az = Hmap.shape[0]
     step = 360.0 / n_az
-    # 方位角 -> 分箱（循环插值）
+    # azimuth -> bin (cyclic interpolation)
     t = (az_deg % 360.0) / step
     m0 = int(np.floor(t)) % n_az
     m1 = (m0 + 1) % n_az
@@ -298,7 +321,7 @@ def illuminate_from_horizon(
     if use_slope_term:
         gx, gy, _ = terrain_gradient(dem, cell)
         dcol, drow, dz = sun_direction(az_deg, el_deg)
-        # 地表法向 n ∝ (-gx, -gy, 1)，与**指向太阳**的方向做内积即为入射角余弦
+        # surface normal n ∝ (-gx, -gy, 1); its dot product with the **Sun-pointing** direction is the incidence cosine
         cos_inc = (-gx * dcol - gy * drow + dz) / np.sqrt(gx ** 2 + gy ** 2 + 1.0)
         illum &= cos_inc > 0.0
 
@@ -306,7 +329,7 @@ def illuminate_from_horizon(
 
 
 # ----------------------------------------------------------------------------
-# A'. 太阳位置与投影（教学/仿真用，高精度请用 SPICE）
+# A'. Solar position and projection (teaching/simulation; use SPICE for high precision)
 # ----------------------------------------------------------------------------
 def solar_position_analytic(
     jd: float,
@@ -314,42 +337,47 @@ def solar_position_analytic(
     lat_deg: float,
     body: str = "moon",
 ) -> tuple[float, float]:
-    """低精度解析法给出太阳的罗盘方位角与高度角（度）。
+    """Low-precision analytic solar compass azimuth and elevation angle (degrees).
 
-    ⚠️ 精度说明：这里用的是"太阳视黄经低精度级数 + 月球卡西尼态自转"的简化模型，
-    典型误差在 0.1°~0.5° 量级，**足以支撑教学与仿真**，但**不足以支撑任务级规划**。
-    任务级请使用 SPICE（spiceypy）：加载月体固连系姿态内核 + 行星星历内核，
-    求太阳相对月球中心的方向，转到 IAU_MOON 固连系，再转到站心系。
+    ⚠️ Accuracy note: this uses a simplified model — a low-precision series for the Sun's
+    apparent ecliptic longitude plus the Moon's Cassini-state rotation — with typical errors
+    on the order of 0.1°–0.5°. That is **enough to support teaching and simulation**, but
+    **not enough to support mission-level planning**. For mission level use SPICE (spiceypy):
+    load a lunar body-fixed orientation kernel + a planetary ephemeris kernel, compute the
+    Sun's direction relative to the Moon's centre, rotate it into the IAU_MOON body-fixed
+    frame, then into the local topocentric frame.
 
-    月球自转：卡西尼态，自转周期 = 公转周期 ≈ 27.32166 d（同步自转）。
+    Lunar rotation: Cassini state, rotation period = orbital period ≈ 27.32166 d
+    (synchronous rotation).
     """
-    # 儒略世纪数
+    # Julian centuries
     T = (jd - 2451545.0) / 36525.0
-    # 太阳几何平黄经与平近点角（Meeus 低精度）
+    # geometric mean longitude and mean anomaly of the Sun (Meeus, low precision)
     L0 = 280.46646 + 36000.76983 * T + 0.0003032 * T * T
     M = 357.52911 + 35999.05029 * T - 0.0001537 * T * T
     Mr = np.deg2rad(M % 360.0)
-    # 中心差
+    # equation of the centre
     C = ((1.914602 - 0.004817 * T - 0.000014 * T * T) * np.sin(Mr)
          + (0.019993 - 0.000101 * T) * np.sin(2 * Mr)
          + 0.000289 * np.sin(3 * Mr))
     true_lon = L0 + C
-    # 黄赤交角
+    # obliquity of the ecliptic
     eps = 23.439291 - 0.0130042 * T
     lam = np.deg2rad(true_lon % 360.0)
     epsr = np.deg2rad(eps)
-    # 太阳赤经赤纬（地心赤道系）
+    # solar right ascension and declination (geocentric equatorial frame)
     ra = np.arctan2(np.cos(epsr) * np.sin(lam), np.cos(lam))
     dec = np.arcsin(np.sin(epsr) * np.sin(lam))
 
     if body.lower() != "moon":
-        raise NotImplementedError("目前仅实现月球")
+        raise NotImplementedError("only the Moon is implemented so far")
 
-    # 月体固连系：Z 轴指向月球北极；本初子午线用卡西尼态近似
-    # 月球北极在 ICRF 中的方向（近似，J2000）：ra_pole ≈ 269.9949°, dec_pole ≈ 66.5392°
+    # Moon body-fixed frame: the Z axis points at the lunar north pole; the prime meridian is
+    # approximated by the Cassini state. Direction of the lunar north pole in ICRF
+    # (approximate, J2000): ra_pole ≈ 269.9949°, dec_pole ≈ 66.5392°
     ra_p = np.deg2rad(269.9949)
     dec_p = np.deg2rad(66.5392)
-    # 太阳方向单位向量（ICRF）
+    # unit vector towards the Sun (ICRF)
     s_vec = np.array([np.cos(dec) * np.cos(ra), np.cos(dec) * np.sin(ra), np.sin(dec)])
     z_axis = np.array([np.cos(dec_p) * np.cos(ra_p), np.cos(dec_p) * np.sin(ra_p), np.sin(dec_p)])
     x_axis = np.cross(z_axis, np.array([0.0, 0.0, 1.0]))
@@ -358,7 +386,7 @@ def solar_position_analytic(
 
     s_body = np.array([s_vec @ x_axis, s_vec @ y_axis, s_vec @ z_axis])
 
-    # 亚太阳点经纬度
+    # sub-solar point lon/lat
     sub_lat = np.rad2deg(np.arcsin(np.clip(s_body[2], -1, 1)))
     sub_lon = np.rad2deg(np.arctan2(s_body[1], s_body[0]))
 
@@ -368,7 +396,7 @@ def solar_position_analytic(
 def _sun_az_el_from_subsolar(
     lon_deg: float, lat_deg: float, sub_lon_deg: float, sub_lat_deg: float
 ) -> tuple[float, float]:
-    """由亚太阳点与站点经纬度求太阳的罗盘方位角与高度角（度）。"""
+    """Solar compass azimuth and elevation angle (degrees) from the sub-solar point and the site lon/lat."""
     lam = np.deg2rad(lon_deg)
     phi = np.deg2rad(lat_deg)
     lams = np.deg2rad(sub_lon_deg)
@@ -377,7 +405,7 @@ def _sun_az_el_from_subsolar(
 
     sin_el = np.sin(phi) * np.sin(phis) + np.cos(phi) * np.cos(phis) * np.cos(dlam)
     el = np.arcsin(np.clip(sin_el, -1, 1))
-    # 方位角（自北向东）
+    # azimuth (from north towards east)
     num = np.sin(dlam) * np.cos(phis)
     den = np.cos(phi) * np.sin(phis) - np.sin(phi) * np.cos(phis) * np.cos(dlam)
     az = np.rad2deg(np.arctan2(num, den)) % 360.0
@@ -387,12 +415,12 @@ def _sun_az_el_from_subsolar(
 def sun_az_el_from_subsolar(
     lon_deg: float, lat_deg: float, sub_lon_deg: float, sub_lat_deg: float
 ) -> tuple[float, float]:
-    """公开别名：由亚太阳点与站点经纬度求太阳的罗盘方位角与高度角（度）。"""
+    """Public alias: solar compass azimuth and elevation angle (degrees) from the sub-solar point and the site lon/lat."""
     return _sun_az_el_from_subsolar(lon_deg, lat_deg, sub_lon_deg, sub_lat_deg)
 
 
 def subsolar_lonlat_analytic(jd: float) -> tuple[float, float]:
-    """低精度亚太阳点经纬度（度）。⚠️ 同样仅适用于教学/仿真。"""
+    """Low-precision sub-solar point lon/lat (degrees). ⚠️ Likewise only suitable for teaching/simulation."""
     T = (jd - 2451545.0) / 36525.0
     L0 = 280.46646 + 36000.76983 * T + 0.0003032 * T * T
     M = np.deg2rad((357.52911 + 35999.05029 * T) % 360.0)
@@ -423,7 +451,7 @@ def dem_to_lonlat(
     north: float,
     res_deg: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """行列号 -> 经纬度（简单等距投影，教学用）。"""
+    """Row/col -> lon/lat (simple equidistant projection, for teaching)."""
     lon = west + np.asarray(cols) * res_deg
     lat = north - np.asarray(rows) * res_deg
     return lon, lat
@@ -438,9 +466,9 @@ def sun_az_el_from_dem(
     jd: float | None = None,
     point_rc: tuple[int, int] | None = None,
 ) -> tuple[float, float]:
-    """给定 DEM 的地理参考与时间，返回该点太阳的 (方位角, 高度角)。
+    """Given the DEM's georeference and a time, return the Sun's (azimuth, elevation) at that point.
 
-    jd 为儒略日；为 None 时用固定示例值（仅演示）。
+    jd is the Julian date; when None, a fixed example value is used (demonstration only).
     """
     H, W = dem.shape
     if point_rc is None:
@@ -455,13 +483,14 @@ def sun_az_el_from_dem(
 
 
 # ----------------------------------------------------------------------------
-# B. 反演：图像 -> 阴影
+# B. Inverse: image -> shadow
 # ----------------------------------------------------------------------------
 def to_luminance(img: np.ndarray, normalize: bool = False) -> np.ndarray:
-    """RGB/RGBA/灰度 -> 浮点亮度。
+    """RGB/RGBA/grayscale -> floating-point luminance.
 
-    normalize=False（默认）保持绝对亮度尺度 [0,1]——阈值法必须这样，
-    因为"暗"是绝对概念。normalize=True 会把最大值拉到 1，仅用于展示。
+    normalize=False (the default) keeps the absolute brightness scale [0,1] — a thresholding
+    method must do this, because "dark" is an absolute notion. normalize=True rescales the
+    maximum to 1 and is for display only.
     """
     a = np.asarray(img).astype(np.float64)
     if a.ndim == 2:
@@ -514,25 +543,28 @@ def image_shadow_mask(
     threshold: float = 0.5,
     morph: int = 1,
 ) -> np.ndarray:
-    """从月面图像中提取阴影掩膜（亮度低 + 饱和度低 + 边界锐利）。
+    """Extract a shadow mask from a lunar-surface image (low brightness + low saturation +
+    sharp boundary).
 
-    实现为**软打分**而非硬与（AND）：
+    Implemented as **soft scoring** rather than a hard AND:
 
         score = darkness * (1 - edge_weight * edge_bonus)
 
-      darkness     = 1 - y / brightness_thr               （越暗越接近 1）
-      sat_penalty  = 1 - s / saturation_thr               （饱和度越高越惩罚）
-      edge_bonus   = 局部存在强梯度的证据（阴影响边界锐利）
+      darkness     = 1 - y / brightness_thr               (the darker, the closer to 1)
+      sat_penalty  = 1 - s / saturation_thr               (the more saturated, the heavier the penalty)
+      edge_bonus   = evidence of a strong local gradient (shadow boundaries are sharp)
 
-    ⚠️ 为什么不用硬 AND：真实/合成的月面阴影常常是**大片连通区域**，其内部梯度为零。
-    若要求"每个阴影像素都必须紧邻强边缘"，召回率会崩掉（实测 F1 从 0.99 掉到 0.38）。
-    边界锐利度是用来**消歧**的旁证，不能作为必要条件。
+    ⚠️ Why not a hard AND: real/synthetic lunar shadows are often **large connected regions**
+    whose interior gradient is zero. Demanding that "every shadow pixel must sit next to a
+    strong edge" destroys recall (measured F1 drops from 0.99 to 0.38). Boundary sharpness is
+    **disambiguating** circumstantial evidence, never a necessary condition.
 
-    ⚠️ 另一个必须知道的失效模式：低反照率物质（暗色月海、暗色晕、玻璃质碎屑）会被
-    误判为阴影。生产环境必须结合几何一致性（与 DEM 预测阴影比对）消歧——这就是
-    check 脚本里"用真值掩膜做 F1 评估"要保留的意义。
+    ⚠️ Another failure mode you must know about: low-albedo materials (dark mare, dark halos,
+    glassy fragments) get misclassified as shadow. Production use must disambiguate with
+    geometric consistency (comparing against DEM-predicted shadows) — that is exactly why the
+    "F1 evaluation against a ground-truth mask" in the check script has to stay.
 
-    Returns: (H, W) uint8，1 = 判为阴影
+    Returns: (H, W) uint8, 1 = classified as shadow
     """
     y = to_luminance(img)
     s = _saturation(img)
@@ -554,10 +586,12 @@ def image_shadow_mask(
 
 
 def illumination_invariant(img: np.ndarray, sigma: int = 5) -> np.ndarray:
-    """局部亮度归一化（光照不变特征，用于压制跨光照的外观差异）。
+    """Local brightness normalisation (an illumination-invariant feature, to suppress
+    appearance differences across illumination).
 
-    做法：I_norm = I / (I_local_mean + eps)，再裁剪到 [0, 1]。
-    用滑动平均实现（O(H*W*sigma)，够用；追求速度可换 scipy.ndimage.uniform_filter）。
+    Recipe: I_norm = I / (I_local_mean + eps), then clip to [0, 1].
+    Implemented with a moving average (O(H*W*sigma), good enough; swap in
+    scipy.ndimage.uniform_filter if you want speed).
     """
     y = to_luminance(img)
     acc = np.zeros_like(y)
@@ -573,29 +607,30 @@ def illumination_invariant(img: np.ndarray, sigma: int = 5) -> np.ndarray:
 
 
 # ----------------------------------------------------------------------------
-# C. 测量/重建
+# C. Measurement/reconstruction
 # ----------------------------------------------------------------------------
 def estimate_sun_elevation_from_shadow(
     object_height_m: float,
     shadow_length_px: float,
     gsd_m_per_px: float,
 ) -> float:
-    """由物体高度与其投影长度反推太阳高度角（度）。
+    """Invert the solar elevation angle (degrees) from an object's height and its projected length.
 
         tan(el) = h / L   ->   el = atan(h / L)
 
-    巡视器自身是已知尺寸的标定物，因此可在**无星历**条件下做星上自检。
+    The rover itself is a calibration target of known size, so this enables an on-board
+    self-check with **no ephemeris**.
     """
     L = shadow_length_px * gsd_m_per_px
     if L <= 0:
-        raise ValueError("阴影长度必须为正")
+        raise ValueError("shadow length must be positive")
     return float(np.rad2deg(np.arctan(object_height_m / L)))
 
 
 def shadow_length_to_height(
     shadow_length_px: float, gsd_m_per_px: float, el_deg: float
 ) -> float:
-    """由阴影长度与太阳高度角反推物体高度（米）：h = L * tan(el)。"""
+    """Invert object height (metres) from the shadow length and the solar elevation angle: h = L * tan(el)."""
     return float(shadow_length_px * gsd_m_per_px * np.tan(np.deg2rad(el_deg)))
 
 
@@ -611,10 +646,12 @@ def recover_sun_geometry(
     metric: str = "iou",
     coarse_step: float = 3.0,
 ) -> dict:
-    """由阴影掩膜反演太阳的 (方位角, 高度角)。
+    """Invert the Sun's (azimuth, elevation) from a shadow mask.
 
-    这是**闭环自检**的核心：已知真值 -> 生成阴影 -> 反演 -> 看误差。
-    做法：粗搜（coarse_step）定位峰值，再在峰值邻域细搜（az_step/el_step）。
+    This is the core of the **closed-loop self-check**: ground truth -> generate shadow ->
+    invert -> inspect the error.
+    Method: a coarse search (coarse_step) localises the peak, then a fine search
+    (az_step/el_step) runs in the peak's neighbourhood.
 
     Returns dict: az_deg, el_deg, score, table (az_list, el_list, scores)
     """
@@ -652,13 +689,13 @@ def recover_sun_geometry(
         "score": best_f["score"],
         "coarse": best_c,
         "table": {"az": azs_f, "el": els_f, "scores": scores_f},
-        "z_az": scores_f.max(axis=0),      # 每个方位角上的最优得分（用于看方位简并）
-        "z_el": scores_f.max(axis=1),      # 每个高度角上的最优得分
+        "z_az": scores_f.max(axis=0),      # best score at each azimuth (to inspect azimuth degeneracy)
+        "z_el": scores_f.max(axis=1),      # best score at each elevation
     }
 
 
 # ----------------------------------------------------------------------------
-# 评估
+# Evaluation
 # ----------------------------------------------------------------------------
 def iou(pred: np.ndarray, gt: np.ndarray) -> float:
     p = np.asarray(pred).astype(bool)
@@ -670,10 +707,12 @@ def iou(pred: np.ndarray, gt: np.ndarray) -> float:
 
 
 def f1_with_tolerance(pred: np.ndarray, gt: np.ndarray, tol: int = 1) -> float:
-    """容差 F1：预测与真值各自膨胀 tol 像素后再计算精确率/召回率。
+    """Tolerance-based F1: dilate prediction and ground truth by tol pixels each, then compute
+    precision/recall.
 
-    **这是本任务唯一正确的评估方式**。原因：DEM 合成阴影与真实阴影必然存在
-    配准误差与边界不一致，逐像素严格比较测到的是配准误差而不是检测性能。
+    **This is the only correct way to evaluate this task.** Reason: DEM-synthesised shadows and
+    real shadows inevitably differ by registration error and boundary mismatch, so a strict
+    per-pixel comparison measures registration error rather than detection performance.
     """
     p = np.asarray(pred).astype(bool)
     g = np.asarray(gt).astype(bool)
@@ -700,11 +739,11 @@ def match_shadow_masks(pred: np.ndarray, gt: np.ndarray, tol: int = 1, metric: s
         if tol > 0:
             p, g = _binary_dilate(p, tol), _binary_dilate(g, tol)
         return iou(p, g)
-    raise ValueError(f"未知 metric: {metric}")
+    raise ValueError(f"unknown metric: {metric}")
 
 
 # ----------------------------------------------------------------------------
-# 合成月面地形（自检与演示用）
+# Synthetic lunar terrain (for the self-check and demos)
 # ----------------------------------------------------------------------------
 def make_synthetic_lunar_dem(
     n: int = 256,
@@ -713,27 +752,32 @@ def make_synthetic_lunar_dem(
     n_craters: int = 14,
     relief: float = 6.0,
 ) -> np.ndarray:
-    """生成合成月面 DEM：分形噪声底 + 若干带坑缘的陨石坑。
+    """Generate a synthetic lunar DEM: a fractal-noise base + several craters with rims.
 
-    **固定 seed 保证可复现**——这是要求 5（可复现性）的实现基础。
+    **A fixed seed guarantees reproducibility** — the basis for requirement 5 (reproducibility).
+
+    The default seed is the date this file was written (2026-10-10). Change it if you like:
+    the terrain is not the point, the shadow it casts is. Every crater rim here exists to
+    throw one hard edge across the ground — the way the opening bars of "Haruhikage"
+    (春日影) throw their first chord and then wait to see what you do with it.
     """
     rng = np.random.default_rng(seed)
     yy, xx = np.mgrid[0:n, 0:n]
 
-    # 分形噪声（多尺度平滑随机场叠加）
+    # fractal noise (a sum of multi-scale smooth random fields)
     h = np.zeros((n, n))
     amp, scale = 1.0, 32.0
     for _ in range(6):
         k = max(3, int(scale))
         base = rng.normal(size=(max(4, n // k + 2), max(4, n // k + 2)))
-        # 双线性上采样到 n x n
+        # bilinear upsample to n x n
         up = _bilinear_upsample(base, n)
         h += amp * up
         amp *= 0.5
         scale /= 2.0
     h = (h - h.mean()) / (h.std() + EPS) * relief
 
-    # 陨石坑：碗形 + 抬升坑缘
+    # craters: bowl shape + raised rim
     for _ in range(n_craters):
         cx, cy = rng.uniform(0.15, 0.85, 2) * n
         r = rng.uniform(0.03, 0.12) * n
