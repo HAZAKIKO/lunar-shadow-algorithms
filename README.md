@@ -116,6 +116,48 @@ Two directly citable empirical results:
 
 ---
 
+## Experiments
+
+### Illumination generalisation for shadow segmentation
+
+[`experiments/illumination_generalisation/`](experiments/illumination_generalisation/README.md) —
+does a shadow detector trained at some sun angles still work at others?
+
+It renders the **same terrain under many sun geometries** (cast shadow included
+in the image, not just local slope), with realistic confounders: very low ambient
+light, an albedo range spanning dark mare to bright highlands, and a per-image
+camera gain that stands in for exposure and radiometric-calibration uncertainty.
+Terrains and sun elevations are disjoint between the train and test splits.
+
+Measured, on 160 train / 128 test samples (F1):
+
+| model | matched lighting | shifted lighting | degradation |
+|---|---|---|---|
+| global brightness threshold | 0.980 | 0.981 | −0.001 |
+| local-contrast (gain-invariant) threshold | 0.875 | 0.824 | +0.051 |
+| per-pixel logistic regression (4 features) | 0.956 | 0.931 | +0.026 |
+| DEM oracle (ceiling) | 1.000 | 1.000 | — |
+
+Three findings worth carrying elsewhere:
+
+1. **Elevation transfer is asymmetric.** Trained at 40° and deployed at 4°: **0.80**
+   F1. Trained at 8° and deployed at 40°: **0.87**. Train at the lowest sun angles
+   you can, even if you care about high ones.
+2. **Higher sun angles are intrinsically harder** (B1: 0.989 at 4° → 0.939 at 30°),
+   because the shadow *fraction* moves with elevation, not just the appearance.
+3. **A fixed global threshold is hard to beat here**, because the airless physics
+   pins shadowed pixels to a near-absolute brightness floor. Being clever about
+   illumination invariance is not automatically a win — measure it.
+
+![train × test elevation matrices](experiments/illumination_generalisation/fig2_matrices.png)
+
+The experiment's own first version had two silent bugs (an image that omitted the
+cast shadow, and a threshold grid capped below the optimum); both are written up
+in [that README](experiments/illumination_generalisation/README.md) because they
+are the kind of mistake that produces plausible-looking wrong numbers.
+
+---
+
 ## Repository layout
 
 ```
