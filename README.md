@@ -124,10 +124,24 @@ print(res["az_deg"], res["el_deg"], res["score"])
 ├── lunar_shadow_figure.png    # 已生成的结果图
 ├── docs/
 │   └── 算法指南.md             # 完整算法文档：约定、公式、选型表、踩坑记录、参考文献
+├── push-to-github.ps1         # 辅助：一键建仓并推送（需本机已装 Git）
+├── publish_via_api.py         # 辅助：免 Git，用 GitHub API 直接发布
+├── verify_remote.py           # 辅助：核对远端与本地是否一致（公开仓库无需令牌）
 ├── LICENSE                    # MIT
 ├── .gitignore
 └── .gitattributes
 ```
+
+### 辅助脚本
+
+| 脚本 | 用途 |
+|---|---|
+| `python verify_remote.py` | 核对 GitHub 上的文件与本地是否逐字节一致（公开仓库**无需令牌**） |
+| `python publish_via_api.py` | 本机没有 Git 时，用 GitHub API 建仓并上传全部文件（需 fine-grained 令牌：`Contents` 与 `Repository creation` 均设为 Read and write） |
+| `./push-to-github.ps1` | 本机已装 Git 时，一键建仓 + 推送（走浏览器授权） |
+
+> **不要把令牌提交进仓库**：`.gitignore` 已排除 `token.txt`，`publish_via_api.py` 也显式跳过它。
+> 令牌请设短有效期，用完立即到 <https://github.com/settings/personal-access-tokens> 撤销。
 
 ---
 
