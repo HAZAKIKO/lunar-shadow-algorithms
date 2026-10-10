@@ -1,6 +1,8 @@
-# 月面光照与阴影算法（Lunar Illumination & Shadow Algorithms）
+# Lunar Illumination & Shadow Algorithms
 
-> 根据阳光与阴影，计算与反演月面任意位置的光照状态。零外部数据依赖，纯 numpy 实现，附 29 项全部通过的自检与论文用图。
+[中文](README.zh-CN.md) | **English**
+
+> Compute and invert the illumination state of any point on the lunar surface from sunlight and shadows. Zero external data dependencies, pure NumPy, with a 29-assertion self-check and a publication-ready figure.
 
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
 [![NumPy](https://img.shields.io/badge/numpy-only-013243.svg)](https://numpy.org/)
@@ -9,59 +11,59 @@
 
 ---
 
-## 这是什么
+## What this is
 
-月球没有大气散射：阴影边界是近乎阶跃的硬边，南极太阳高度角常年只有 1–2°。后果是一个极具工程意义的量级关系
+The Moon has no atmospheric scattering: shadow boundaries are nearly step edges, and the solar elevation angle near the poles stays around 1–2° year-round. The consequence is an engineering formula with teeth:
 
 $$L_{\text{shadow}} = \frac{h}{\tan h_s} \approx \frac{h}{\tan 1.5°} \approx 38\,h$$
 
-**一块 1 m 高的石头能投出约 38 m 长的影子。** 于是在月球极区，光照与阴影不是渲染效果，而是**主导性的可观测性与安全问题**：大片区域会因为落在阴影里而无法观测、无法通行。
+**A 1 m boulder casts a shadow about 38 m long.** In the lunar polar regions, illumination is therefore not a rendering detail but a *dominant* observational and safety constraint: large areas become unobservable and untraversable simply because they lie in shadow.
 
-本仓库提供三类算法（详见 [算法指南](docs/算法指南.md)）：
+This repository provides three families of algorithms (full documentation in the [algorithm guide](docs/algorithm-guide.md)):
 
-| 类别 | 输入 → 输出 | 主要函数 |
+| Family | Input → Output | Key functions |
 |---|---|---|
-| **A 正演** | DEM + 太阳位置 → 光照/阴影掩膜 | `compute_illumination()`、`horizon_map()`、`illuminate_from_horizon()` |
-| **A′** | 时间 + 经纬度 → 太阳方位角/高度角 | `solar_position_analytic()`、`sun_az_el_from_subsolar()` |
-| **B 反演** | 单张图像 → 阴影掩膜 | `image_shadow_mask()`、`illumination_invariant()` |
-| **C 测量/重建** | 阴影 → 太阳角 / 物体高度 / 太阳几何 | `recover_sun_geometry()`、`shadow_length_to_height()`、`estimate_sun_elevation_from_shadow()` |
+| **A — Forward** | DEM + sun position → illumination/shadow mask | `compute_illumination()`, `horizon_map()`, `illuminate_from_horizon()` |
+| **A′** | Time + lat/lon → solar azimuth/elevation | `solar_position_analytic()`, `sun_az_el_from_subsolar()` |
+| **B — Inverse** | Single image → shadow mask | `image_shadow_mask()`, `illumination_invariant()` |
+| **C — Measurement** | Shadow → sun angles / object height / solar geometry | `recover_sun_geometry()`, `shadow_length_to_height()`, `estimate_sun_elevation_from_shadow()` |
 
 ---
 
-## 快速开始
+## Quick start
 
 ```bash
-git clone https://github.com/<你的用户名>/<仓库名>.git
-cd <仓库名>
+git clone https://github.com/HAZAKIKO/lunar-shadow-algorithms.git
+cd lunar-shadow-algorithms
 
 pip install numpy
 
-# 1) 自检：29 项断言，确认算法与环境都正确（无需任何外部数据）
+# 1) Self-check: 29 assertions, no external data required
 python check_lunar_shadow.py
 
-# 2) 出图（额外需要 matplotlib）
+# 2) Figure generation (needs matplotlib)
 pip install matplotlib
 python make_figure.py --n 192 --az 137 --el 6
 ```
 
-最小用法：
+Minimal usage:
 
 ```python
 import lunar_shadow as ls
 
-# 造一块合成月面地形（固定 seed，可复现）
+# Build a synthetic lunar terrain (fixed seed -> reproducible)
 dem = ls.make_synthetic_lunar_dem(n=256, seed=42, relief=8.0)
 
-# 正演：太阳方位 137°、高度 6° 时的光照掩膜（1 = 被照亮，0 = 在阴影中）
+# Forward: illumination mask for sun azimuth 137°, elevation 6° (1 = lit, 0 = shadowed)
 illum = ls.compute_illumination(dem, az_deg=137.0, el_deg=6.0, cell=1.0)
-print("阴影占比", float((illum == 0).mean()))
+print("shadow fraction", float((illum == 0).mean()))
 
-# 要遍历大量太阳角？先建地平线图，之后每次换角度只需查表
+# Sweeping many sun angles? Precompute a horizon map; every later query is a lookup.
 Hmap = ls.horizon_map(dem, cell=1.0, n_az=72)
 for az in range(0, 360, 10):
     m = ls.illuminate_from_horizon(dem, Hmap, az, el_deg=6.0, cell=1.0)
 
-# 反演闭环：由阴影掩膜反推太阳几何（粗搜 + 邻域细搜）
+# Inversion loop: recover solar geometry from a shadow mask (coarse + local refine)
 res = ls.recover_sun_geometry(dem, illum == 0, coarse_step=5.0,
                               az_step=2.0, el_step=0.5, tol=1)
 print(res["az_deg"], res["el_deg"], res["score"])
@@ -69,105 +71,108 @@ print(res["az_deg"], res["el_deg"], res["score"])
 
 ---
 
-## 结果
+## Results
 
-![月面光照阴影算法结果](lunar_shadow_figure.png)
+![Lunar illumination and shadow algorithms](lunar_shadow_figure.png)
 
-| 面板 | 内容 |
+| Panel | Content |
 |---|---|
-| (a) | 合成月面 DEM（分形噪声 + 带坑缘的陨石坑） |
-| (b) | 中心像素的**地平线角极坐标剖面** —— 一眼看出障碍物在哪个方位 |
-| (c)(d) | 两种独立实现的阴影掩膜与**不一致像素**（红），一致率 98.97% |
-| (e) | 由阴影掩膜反演太阳几何的 **IoU 热力图**（白圈=真值，红星=最优解） |
-| (f) | **容差曲线** —— 论证为什么必须用容差 F1 而不是逐像素 IoU |
+| (a) | Synthetic lunar DEM (fractal noise + craters with raised rims) |
+| (b) | **Polar profile of the horizon angle** at the centre pixel — shows at a glance which bearing is blocked |
+| (c)(d) | Shadow masks from the two independent implementations, plus **disagreeing pixels** (red); agreement 98.97% |
+| (e) | **IoU heatmap** of the shadow-mask inversion (white circle = ground truth, red star = best fit) |
+| (f) | **Tolerance curve** — why evaluation must use tolerance-based F1, not per-pixel IoU |
 
 ---
 
-## 两个实现为什么都保留
+## Why two independent implementations
 
-`compute_illumination()`（射线行进）与 `horizon_map()` + `illuminate_from_horizon()`（地平线图）是**用完全不同的循环结构写的两套独立实现**。保留两套的理由是交叉验证：它们一致，才说明几何真的对了。
+`compute_illumination()` (ray marching) and `horizon_map()` + `illuminate_from_horizon()` (horizon maps) are **two independent implementations written with completely different loop structures**. Both are kept for cross-validation: only when they agree is the geometry actually right.
 
-| 方法 | 复杂度 | 换太阳方位角 |
+| Method | Complexity | Changing sun azimuth |
 |---|---|---|
-| 射线行进 | $O(N_{\text{step}}\cdot N_{\text{pix}})$ | 必须重算 |
-| 地平线图 | 预计算 $O(N_{az}\cdot N_{\text{step}}\cdot N_{\text{pix}})$，之后 **$O(N_{\text{pix}})$ 查表** | **不用重算** |
+| Ray marching | $O(N_{\text{step}}\cdot N_{\text{pix}})$ | must recompute |
+| Horizon map | Precompute $O(N_{az}\cdot N_{\text{step}}\cdot N_{\text{pix}})$, then **$O(N_{\text{pix}})$ lookup** | **no recompute** |
 
-**实测交叉一致性**（192×192 合成月面，`n_az=72` 即 5° 分箱）：最差像素一致率 **97.88%**，阴影面积占比最大差 **0.87%**。
-
----
-
-## 自检抓住了什么
-
-`check_lunar_shadow.py` 的 29 项断言在开发过程中抓出了 4 个真实 bug，全部记录在[算法指南 §8](docs/算法指南.md)：
-
-1. **射线行进判别式方向写反** → 平坦地形 100% 全黑
-2. **`np.roll` 环形回绕** → 图像边缘产生虚假遮挡，必须零填充
-3. **`sun_direction(az, 90°)` 取水平方向** → `cos(90°)=0` 让向量退化成零向量，整个地平线图**静默失效**且不报错
-4. **地平线图采样方向差 180°** → 阴影画到太阳同侧
-
-第 4 个特别值得记住：**这类符号错误只能靠解析算例钉死**。仓库里用"南北向山脊（高 10 m）+ 太阳在正西"验证：解析地平角 atan(10/50) = 11.31°，实测山脊西侧 11.31°、东侧 0.00°，射线行进阴影落在山脊东侧。
-
-两个可以直接引用的实测结论：
-
-- **方位角简并（方法固有限制，非 bug）**：单张阴影掩膜反演太阳几何时，高度角几乎完美（Δel = 0.0°），但方位角最优与次优解的 IoU 差距只有 **0.002–0.009** —— 因为投射阴影的形状主要由高度角决定。
-- **必须用容差 F1**：整体错位 8 像素时，无容差 IoU 掉到 0.806，而 F1(tol=3px) 仍有 0.976。无容差的 IoU 测的**主要是配准误差，不是检测性能**。
+**Measured cross-consistency** (192×192 synthetic terrain, `n_az=72` i.e. 5° bins): worst-case pixel agreement **97.88%**, largest shadow-fraction difference **0.87%**.
 
 ---
 
-## 仓库结构
+## What the self-check caught
+
+The 29 assertions in `check_lunar_shadow.py` caught four real bugs during development; all are documented in the [algorithm guide §8](docs/algorithm-guide.md):
+
+1. **Sign error in the ray-marching predicate** → flat terrain came out 100% black
+2. **`np.roll` wraps around** → phantom occlusion at image borders; must be zero-padded
+3. **`sun_direction(az, 90°)` used for a horizontal direction** → `cos(90°)=0` collapses the vector to zero, making the whole horizon map **silently fail** with no error
+4. **Horizon-map sampling direction off by 180°** → shadows drawn on the sunlit side
+
+Bug 4 is the one worth remembering: **this class of sign error can only be pinned down by an analytic test case.** The repository uses a north–south ridge (10 m tall) with the sun due west: the analytic horizon angle is atan(10/50) = 11.31°, and the measurement gives 11.31° west of the ridge and 0.00° east of it, with ray-marched shadows falling east of the ridge.
+
+Two directly citable empirical results:
+
+- **Azimuth degeneracy (an inherent limitation, not a bug)**: inverting solar geometry from a single shadow mask nails the elevation angle (Δel = 0.0°) but the top-1 and top-2 azimuths differ by only **0.002–0.009 IoU** — because cast-shadow shape is governed mainly by elevation.
+- **Tolerance-based F1 is mandatory**: under an 8-pixel registration offset, tolerance-free IoU drops to 0.806 while F1(tol=3px) still holds 0.976. Per-pixel IoU measures **registration error, not detection performance**.
+
+---
+
+## Repository layout
 
 ```
 .
-├── lunar_shadow.py            # 全部算法实现（仅需 numpy）
-├── check_lunar_shadow.py      # 自检脚本：29 项断言
-├── make_figure.py             # 生成 6 面板结果图
-├── lunar_shadow_figure.png    # 已生成的结果图
+├── lunar_shadow.py             # All algorithms (NumPy only)
+├── check_lunar_shadow.py       # Self-check: 29 assertions
+├── make_figure.py              # Generates the 6-panel figure
+├── lunar_shadow_figure.png     # Pre-generated figure
+├── README.md                   # English (this file)
+├── README.zh-CN.md             # Chinese
 ├── docs/
-│   └── 算法指南.md             # 完整算法文档：约定、公式、选型表、踩坑记录、参考文献
-├── push-to-github.ps1         # 辅助：一键建仓并推送（需本机已装 Git）
-├── publish_via_api.py         # 辅助：免 Git，用 GitHub API 直接发布
-├── verify_remote.py           # 辅助：核对远端与本地是否一致（公开仓库无需令牌）
-├── LICENSE                    # MIT
+│   ├── algorithm-guide.md      # Algorithm guide (English)
+│   └── 算法指南.md              # Algorithm guide (Chinese)
+├── push-to-github.ps1          # Helper: create repo + push (requires local Git)
+├── publish_via_api.py          # Helper: publish via GitHub API (no Git required)
+├── verify_remote.py            # Helper: verify remote matches local (no token needed for public repos)
+├── LICENSE                     # MIT
 ├── .gitignore
 └── .gitattributes
 ```
 
-### 辅助脚本
+### Helper scripts
 
-| 脚本 | 用途 |
+| Script | Purpose |
 |---|---|
-| `python verify_remote.py` | 核对 GitHub 上的文件与本地是否逐字节一致（公开仓库**无需令牌**） |
-| `python publish_via_api.py` | 本机没有 Git 时，用 GitHub API 建仓并上传全部文件（需 fine-grained 令牌：`Contents` 与 `Repository creation` 均设为 Read and write） |
-| `./push-to-github.ps1` | 本机已装 Git 时，一键建仓 + 推送（走浏览器授权） |
+| `python verify_remote.py` | Verify GitHub files match the local copy byte-for-byte (**no token needed** for public repos) |
+| `python publish_via_api.py` | Create the repo and upload everything via the GitHub API when Git is unavailable (needs a fine-grained token with `Contents` and `Repository creation` set to Read and write) |
+| `./push-to-github.ps1` | One-click create + push when Git is installed (browser-based auth) |
 
-> **不要把令牌提交进仓库**：`.gitignore` 已排除 `token.txt`，`publish_via_api.py` 也显式跳过它。
-> 令牌请设短有效期，用完立即到 <https://github.com/settings/personal-access-tokens> 撤销。
-
----
-
-## 使用须知与局限
-
-- **太阳位置精度**：`solar_position_analytic()` 用的是低精度解析法（太阳视黄经简化级数 + 月球卡西尼态自转），典型误差 **0.1°–0.5°**，**足以支撑教学与仿真，不足以支撑任务级规划**。任务级请使用 [SPICE / spiceypy](https://naif.jpl.nasa.gov/naif/toolkit.html)。
-- **不适用于真实影像的逐像素对齐**：DEM 算出的阴影掩膜受分辨率、阴影区高程插值误差、配准误差三重影响，**不能直接当训练标签**，评估必须用容差指标。
-- **`image_shadow_mask()` 的已知失效模式**：低反照率物质（暗色月海、暗色晕、玻璃质碎屑）会被误判为阴影。消歧方法是与 DEM 预测阴影做几何一致性检验 —— 而"图像暗但 DEM 预测被照亮"的那些像素，恰恰就是潜在的科学目标候选。
+> **Never commit a token**: `.gitignore` excludes `token.txt` and `publish_via_api.py` skips it explicitly.
+> Use short-lived tokens and revoke them at <https://github.com/settings/personal-access-tokens>.
 
 ---
 
-## 引用
+## Caveats and limitations
 
-如果你在研究中使用本仓库，可引用：
+- **Solar position accuracy**: `solar_position_analytic()` uses a low-precision analytic method (truncated solar ecliptic longitude series + the Moon's Cassini state rotation), with typical error **0.1°–0.5°**. That is **sufficient for teaching and simulation, insufficient for mission-level planning** — use [SPICE / spiceypy](https://naif.jpl.nasa.gov/naif/toolkit.html) for the latter.
+- **Not for per-pixel alignment against real imagery**: DEM-derived shadow masks are affected by resolution, interpolated elevations inside shadowed areas, and registration error. They **must not be used directly as training labels**, and evaluation must use tolerance-based metrics.
+- **Known failure mode of `image_shadow_mask()`**: low-albedo materials (dark mare, dark halos, glassy pyroclastics) are misclassified as shadow. Disambiguate by checking geometric consistency against DEM-predicted shadows — and note that the pixels which are *dark in the image but predicted lit by the DEM* are precisely the promising science-target candidates.
+
+---
+
+## Citation
+
+If you use this repository in your research:
 
 ```bibtex
 @misc{lunar_shadow_2026,
-  title  = {月面光照与阴影算法：基于 DEM 的阴影正演、图像反演与太阳几何重建},
-  author = {<你的姓名>},
+  title  = {Lunar Illumination and Shadow Algorithms: DEM-based shadow casting, image inversion, and solar geometry recovery},
+  author = {HAZAKIKO},
   year   = {2026},
-  url    = {https://github.com/<你的用户名>/<仓库名>}
+  url    = {https://github.com/HAZAKIKO/lunar-shadow-algorithms}
 }
 ```
 
-参考文献（含奠基工作与相关现代方法）见[算法指南 §9.3 与 §11](docs/算法指南.md)。
+See the [algorithm guide §9.3 and §11](docs/algorithm-guide.md) for the reference list, including the foundational works and related modern methods.
 
-## 许可
+## License
 
 [MIT](LICENSE)
