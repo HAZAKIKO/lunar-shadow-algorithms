@@ -1,19 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-make_figure.py —— 可视化月面光照/阴影算法结果
+make_figure.py —— visualise the output of the lunar illumination/shadow algorithms
 ============================================
 
-运行：python make_figure.py [--n 192] [--az 137] [--el 6] [--out figure.png]
+Run: python make_figure.py [--n 192] [--az 137] [--el 6] [--out figure.png]
 
-产出 6 幅子图：
-  (a) 合成月面 DEM + 等高线
-  (b) 地平线图在给定太阳方位角下的极坐标切片（度）
-  (c) 射线行进法的阴影掩膜
-  (d) 地平线图查表法的阴影掩膜 + 两法不一致像素（红）
-  (e) 由阴影掩膜反演太阳几何的 IoU 热力图
-  (f) 容差 F1 / IoU 随太阳角扰动的衰减曲线
+It produces 6 panels:
+  (a) Synthetic lunar DEM + contours
+  (b) Polar slice of the horizon map at the given sun azimuth (degrees)
+  (c) Shadow mask from ray marching
+  (d) Shadow mask from horizon-map lookup + pixels where the two disagree (red)
+  (e) IoU heatmap of the solar-geometry inversion from the shadow mask
+  (f) Decay curves of tolerance-based F1 / IoU as the sun angle is perturbed
 
-图表标题用英文，避免中文字体缺失告警。所有数值都会同时打印到终端。
+Panel titles are in English to avoid missing-CJK-font warnings. Every number is also printed
+to the terminal.
 """
 
 from __future__ import annotations
@@ -42,7 +43,7 @@ def main() -> int:
     print(f"DEM {dem.shape}, relief std = {dem.std():.3f} m")
     print(f"sun az = {az}°, el = {el}°")
 
-    # ---- 三种光照结果 -------------------------------------------------------
+    # ---- three illumination results ------------------------------------------
     m_ray = ls.compute_illumination(dem, az, el, cell=1.0, use_slope_term=True)
     Hmap = ls.horizon_map(dem, cell=1.0, n_az=72)
     m_hor = ls.illuminate_from_horizon(dem, Hmap, az, el, cell=1.0, use_slope_term=True)
@@ -52,13 +53,13 @@ def main() -> int:
     print(f"shadow fraction: ray = {f_shadow_ray:.4f}, horizon = {f_shadow_hor:.4f}")
     print(f"agreement = {agree:.4f}")
 
-    # ---- 方位角切片 ---------------------------------------------------------
+    # ---- azimuth slice ------------------------------------------------------
     n_az = Hmap.shape[0]
     az_bins = np.arange(n_az) * (360.0 / n_az)
     i0, j0 = args.n // 2, args.n // 2
     az_profile = Hmap[:, i0, j0]
 
-    # ---- 太阳几何反演 -------------------------------------------------------
+    # ---- solar-geometry inversion -------------------------------------------
     gt = (m_ray == 0)
     print("recovering sun geometry (coarse->fine search) ...")
     res = ls.recover_sun_geometry(
@@ -70,7 +71,7 @@ def main() -> int:
           f"el = {res['el_deg']:.1f}° (Δ={abs(res['el_deg']-el):.1f}°), "
           f"IoU = {res['score']:.4f}")
 
-    # ---- 容差衰减曲线 -------------------------------------------------------
+    # ---- tolerance decay curves ---------------------------------------------
     shifts = [0, 1, 2, 3, 4, 6, 8, 12]
     ious, f1s = [], []
     for s in shifts:
@@ -78,7 +79,7 @@ def main() -> int:
         ious.append(ls.iou(shifted, gt))
         f1s.append(ls.f1_with_tolerance(shifted, gt, tol=3))
 
-    # ---- 绘图 ---------------------------------------------------------------
+    # ---- plotting -----------------------------------------------------------
     fig = plt.figure(figsize=(16.5, 10))
     gs = fig.add_gridspec(2, 3)
     ax_a = fig.add_subplot(gs[0, 0])
@@ -152,7 +153,7 @@ def main() -> int:
     fig.savefig(args.out, dpi=150)
     print(f"saved -> {args.out}")
 
-    # 终端数值表（供论文直接抄）
+    # Numeric table for the terminal (ready to copy straight into a paper)
     print("\n--- numeric summary ---")
     print(f"shadow fraction ray / horizon : {f_shadow_ray:.4f} / {f_shadow_hor:.4f}")
     print(f"cross-check agreement         : {agree:.4f}")
