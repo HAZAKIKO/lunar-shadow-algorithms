@@ -162,6 +162,16 @@ print(res["az_deg"], res["el_deg"], res["score"])
 ├── docs/
 │   ├── algorithm-guide.md      # 算法指南（英文）
 │   └── 算法指南.md              # 算法指南（中文）
+├── c/
+│   ├── lunar_shadow.c          # 数值核心的 C99 移植（仅需 -lm）
+│   └── README.md               # 为什么有 C 版、编译步骤、与 Python 的实测一致性
+├── experiments/
+│   └── illumination_generalisation/   # 配对光照数据集 + 泛化矩阵
+├── tools/
+│   ├── verify_c_vs_python.py   # 证明 C 移植与 Python 参考实现一致
+│   ├── compare_intermediates.py# 定位 C 与 Python 从哪一步开始分歧
+│   ├── probe_shift.py          # 实测移位辅助函数的符号约定
+│   └── probe_ray.py            # 用解析山脊算例钉死所有符号约定
 ├── push-to-github.ps1          # 辅助：一键建仓并推送（需本机已装 Git）
 ├── publish_via_api.py          # 辅助：免 Git，用 GitHub API 直接发布
 ├── verify_remote.py            # 辅助：核对远端与本地是否一致（公开仓库无需令牌）
@@ -177,6 +187,27 @@ print(res["az_deg"], res["el_deg"], res["score"])
 | `python verify_remote.py` | 核对 GitHub 上的文件与本地是否逐字节一致（公开仓库**无需令牌**） |
 | `python publish_via_api.py` | 本机没有 Git 时，用 GitHub API 建仓并上传全部文件（需 fine-grained 令牌：`Contents` 与 `Repository creation` 均设为 Read and write） |
 | `./push-to-github.ps1` | 本机已装 Git 时，一键建仓 + 推送（走浏览器授权） |
+
+### 作者提供了不同版本以供参考 · The author provides different versions for reference
+
+同一套几何以两种语言提供，而且是**互相校验**过的，不是各写一份放着：
+
+| 版本 | 位置 | 为什么存在 |
+|---|---|---|
+| **Python**（参考实现） | `lunar_shadow.py` | 先读这份：完整推导、每个符号约定背后的理由、29 项自检 |
+| **C99**（星载形态） | `c/lunar_shadow.c` | 真正跑在抗辐射处理器上的形态：不需要 Python 运行时、不需要 NumPy，只要 `-lm` |
+
+```bash
+gcc -O2 -std=c99 -o c/lunar_shadow c/lunar_shadow.c -lm
+python tools/verify_c_vs_python.py --exe c/lunar_shadow
+```
+
+当前结果：射线行进与地平线图查表两条路径的光照掩膜均与 Python **100.000% 逐像素一致**（四组太阳几何）。
+唯一残留差异（horizon map 的边界格子，1.35%，且**不影响**任何光照输出）如实写在
+[c/README.md](c/README.md) 里，没有藏起来。
+
+这次移植是**有价值的**：正是 C 版暴露了 Python 里 `_shift_zero` 的符号错误 —— 它一直在把投射阴影镜像到错误一侧。
+现在 `tools/probe_ray.py` 用解析山脊算例把这个约定钉死，不会再漂回去。
 
 > **不要把令牌提交进仓库**：`.gitignore` 已排除 `token.txt`，`publish_via_api.py` 也显式跳过它。
 > 令牌请设短有效期，用完立即到 <https://github.com/settings/personal-access-tokens> 撤销。
