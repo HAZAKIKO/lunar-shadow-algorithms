@@ -168,9 +168,19 @@ are the kind of mistake that produces plausible-looking wrong numbers.
 ├── lunar_shadow_figure.png     # Pre-generated figure
 ├── README.md                   # English (this file)
 ├── README.zh-CN.md             # Chinese
+├── c/
+│   ├── lunar_shadow.c          # C99 port of the numerical core (only -lm)
+│   └── README.md               # Why a C version, build steps, verified agreement
 ├── docs/
 │   ├── algorithm-guide.md      # Algorithm guide (English)
 │   └── 算法指南.md              # Algorithm guide (Chinese)
+├── experiments/
+│   └── illumination_generalisation/   # paired-illumination dataset + generalisation matrices
+├── tools/
+│   ├── verify_c_vs_python.py   # proves the C port agrees with the Python reference
+│   ├── compare_intermediates.py# finds the FIRST stage where C and Python diverge
+│   ├── probe_shift.py          # measures the shift helper's sign convention
+│   └── probe_ray.py            # analytic ridge checks for every sign convention
 ├── push-to-github.ps1          # Helper: create repo + push (requires local Git)
 ├── publish_via_api.py          # Helper: publish via GitHub API (no Git required)
 ├── verify_remote.py            # Helper: verify remote matches local (no token needed for public repos)
@@ -186,6 +196,29 @@ are the kind of mistake that produces plausible-looking wrong numbers.
 | `python verify_remote.py` | Verify GitHub files match the local copy byte-for-byte (**no token needed** for public repos) |
 | `python publish_via_api.py` | Create the repo and upload everything via the GitHub API when Git is unavailable (needs a fine-grained token with `Contents` and `Repository creation` set to Read and write) |
 | `./push-to-github.ps1` | One-click create + push when Git is installed (browser-based auth) |
+
+### 作者提供了不同版本以供参考 · The author provides different versions for reference
+
+The same geometry ships in two languages, cross-checked rather than merely both present:
+
+| Version | Where | Why it exists |
+|---|---|---|
+| **Python** (reference) | `lunar_shadow.py` | Read this first: full derivations, the reasoning behind every sign convention, 29-assertion self-check |
+| **C99** (flight-shaped) | `c/lunar_shadow.c` | What actually runs on a radiation-hardened processor: no Python runtime, no NumPy, `-lm` and nothing else |
+
+```bash
+gcc -O2 -std=c99 -o c/lunar_shadow c/lunar_shadow.c -lm
+python tools/verify_c_vs_python.py --exe c/lunar_shadow
+```
+
+Current result: **100.000% pixel agreement on the illumination mask** for both the ray-marching
+and horizon-lookup paths, across four sun geometries. The one remaining divergence (horizon-map
+border cells, 1.35%, which does not affect either illumination path) is documented in
+[c/README.md](c/README.md) rather than hidden.
+
+Porting to a second language earned its keep here: the C version is what exposed a sign error in
+the Python `_shift_zero` helper that had been silently mirroring cast shadows. `tools/probe_ray.py`
+now pins that convention against an analytic ridge answer so it cannot drift back.
 
 > **Never commit a token**: `.gitignore` excludes `token.txt` and `publish_via_api.py` skips it explicitly.
 > Use short-lived tokens and revoke them at <https://github.com/settings/personal-access-tokens>.
