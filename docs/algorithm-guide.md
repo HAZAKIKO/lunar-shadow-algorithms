@@ -321,9 +321,29 @@ Infer surface slope from brightness gradients, used to **fill in the lack of ele
 
 Measured: `Hmap[due-west bin, 100, 150] = 11.31°`, `Hmap[due-west bin, 100, 50] = 0.00°`, and the ray-marching shadow falls on col 101–200. **This one test beats a thousand lines of code review.**
 
-### 8.2 The Circular Wraparound of `np.roll`
+### 8.2 Why `_shift_zero` exists, and what its sign convention really is
 
-`np.roll` wraps around at the edges, producing spurious occlusion. Zero padding is mandatory (this module's `_shift_zero()`). **Sanity test: flat terrain must be 100% fully lit.** Measured shadow pixels = 0.
+A plain `np.roll` wraps around at the edges, producing spurious occlusion. `_shift_zero()` is
+therefore built **on top of** `np.roll` and then overwrites the wrapped band with a filler, so
+its semantics are unambiguous and directly verifiable:
+
+```
+_shift_zero(a, drow, dcol)[i, j] == a[i - drow, j - dcol]
+```
+
+Out of bounds the sample becomes the filler (`-inf`, i.e. "no terrain occludes here"), which can
+never raise the horizon. **Sanity test: flat terrain must be 100% fully lit.** Measured shadow
+pixels = 0.
+
+That sign is load-bearing, and getting it wrong is invisible in a rendered image. An earlier
+version of this helper computed `a[i + drow, j + dcol]` while documenting the opposite, and
+because two call sites compensated with a matching flip, the ray march appeared to work while
+actually sampling *away* from the Sun. The tell-tale was roughly 60% of row 0 being reported as
+shadowed on a DEM where the analytic answer is "lit". It surfaced only when the routine was
+ported to C and the two implementations were diffed pixel by pixel (4705 differing pixels is a
+bug report). It is now pinned by closed-form checks in `tools/probe_ray.py`: a 10 m ridge lit
+from due west must show a horizon angle of atan(10/25) = 21.80 deg on its **eastern** side and
+0 on its western side. Measure this convention; never re-derive it from a comment.
 
 ### 8.3 Using `sun_direction(az, 90°)` for a Horizontal Direction — Zero Vector, Silent Failure
 
