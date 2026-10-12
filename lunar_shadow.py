@@ -110,24 +110,35 @@ def terrain_gradient(dem: np.ndarray, cell: float = 1.0):
 
 
 def _shift_zero(a: np.ndarray, drow: int, dcol: int, fill: float) -> np.ndarray:
-    """Zero-padded shift: out[i, j] = a[i - drow, j - dcol], out-of-bounds filled with fill.
+    """Shift with edge padding: out[i, j] = a[i - drow, j - dcol], out-of-bounds = fill.
 
-    This is the key utility of this module: **zero padding is mandatory; np.roll is not allowed**.
-    np.roll is a cyclic wrap-around, which produces phantom occlusion at image borders.
+    This is the key utility of this module: **padding is mandatory; plain np.roll is not
+    allowed** because it wraps around and produces phantom occlusion at the image border.
+
+    The sign convention is the one thing that matters here, and it is written twice by
+    accident if you are not careful. The implementation below uses np.roll (whose
+    semantics are beyond doubt) and then overwrites the wrapped band with `fill`, so the
+    documented rule and the code cannot drift apart:
+
+        np.roll(a, (drow, dcol))[i, j] == a[i - drow, j - dcol]
+
+    Reading: a POSITIVE drow makes out[i, j] take the value from the row ABOVE (i - drow).
+    Three separate sign errors in this file trace back to this one line, including one
+    that mirrored every cast shadow onto the sunlit side of its ridge; tools/probe_ray.py
+    now pins it against the analytic ridge answer.
     """
     H, W = a.shape
+    out = np.roll(a, (int(drow), int(dcol)), axis=(0, 1)).astype(np.float64, copy=True)
 
-    def _sl(start: int, shift: int, n: int) -> slice:
-        """Slice of the interval [start, start+n) after subtracting shift (for destination or source)."""
-        return slice(start - shift, start - shift + n)
-
-    rows_dst = slice(max(0, drow), H + min(0, drow))
-    cols_dst = slice(max(0, dcol), W + min(0, dcol))
-    rows_src = _sl(max(0, drow), drow, rows_dst.stop - rows_dst.start)
-    cols_src = _sl(max(0, dcol), dcol, cols_dst.stop - cols_dst.start)
-
-    out = np.full((H, W), fill, dtype=np.float64)
-    out[rows_dst, cols_dst] = a[rows_src, cols_src]
+    # Overwrite the rows/columns that np.roll wrapped around from the far edge.
+    if drow > 0:
+        out[:drow, :] = fill
+    elif drow < 0:
+        out[drow:, :] = fill
+    if dcol > 0:
+        out[:, :dcol] = fill
+    elif dcol < 0:
+        out[:, dcol:] = fill
     return out
 
 
@@ -205,8 +216,11 @@ def compute_illumination(
     #   (a sanity check).
     alive = illum.copy()
     for k in range(1, max_steps + 1):
-        srow = int(round(-k * drow / cell))      # note the minus sign: sample towards the Sun
-        scol = int(round(-k * dcol / cell))      # note the minus sign: sample towards the Sun
+        # _shift_zero(a, d, e) reads a[i - d, j - e]. sun_direction() points AT the Sun, so
+        # to walk towards it we must pass the NEGATED offset. Verified by
+        # tools/probe_ray.py against the analytic ridge answer; do not flip alone.
+        srow = int(round(-k * drow / cell))
+        scol = int(round(-k * dcol / cell))
         if abs(srow) >= H or abs(scol) >= W:
             break
         if srow == 0 and scol == 0:
@@ -279,12 +293,16 @@ def horizon_map(
     Hmap = np.zeros((n_az, H, W), dtype=np.float32)
 
     for m, az_deg in enumerate(az_list):
-        # unit horizontal direction pointing at the Sun (must NOT be horizontal_direction(az_deg): off by 180°)
-        dcol, drow = horizontal_direction(az_deg + 180.0)
+        # horizontal_direction(az) points at the Sun; _shift_zero(a, d, e) reads
+        # a[i - d, j - e], so the NEGATED offset walks the ray towards the Sun.
+        # Equivalent alternative: horizontal_direction(az + 180) with a positive offset.
+        # The two signs must be flipped together -- flipping only one is the bug that
+        # tools/probe_ray.py exists to catch.
+        dcol, drow = horizontal_direction(az_deg)
         best = np.full((H, W), -90.0, dtype=np.float64)
         for k in range(1, max_steps + 1):
-            srow = int(round(k * drow))
-            scol = int(round(k * dcol))
+            srow = int(round(-k * drow))
+            scol = int(round(-k * dcol))
             if srow == 0 and scol == 0:
                 continue
             if abs(srow) >= H or abs(scol) >= W:
